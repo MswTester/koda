@@ -22,12 +22,12 @@ k >= 10 ? {
 
 k >= 20 ? print(true) : print(false)
 
-dynamicVar = u32 {
+dynamic_var = u32 { # 컴파일 단계에서 계산 끝남.
   a + b
   a / b
   a - b # 무조건 블럭 마지막값을 반환
 }
-print(dynamicVar)
+print(dynamic_var)
 
 n = 5
 iter = 0..n

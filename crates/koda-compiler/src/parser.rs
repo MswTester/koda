@@ -69,9 +69,15 @@ impl Parser {
             Continue => "continue",
             As => "as",
             Plus => "+",
+            PlusEq => "+=",
             Minus => "-",
+            MinusEq => "-=",
             Star => "*",
+            StarEq => "*=",
             Slash => "/",
+            SlashEq => "/=",
+            Percent => "%",
+            PercentEq => "%=",
             LParen => "(",
             RParen => ")",
             LBrace => "{",
@@ -79,15 +85,32 @@ impl Parser {
             Comma => ",",
             Colon => ":",
             Question => "?",
+            QuestionQuestion => "??",
+            QuestionQuestionEq => "??=",
             Dot => ".",
             DotDot => "..",
             Eq => "=",
             EqEq => "==",
             NotEq => "!=",
+            Not => "!",
+            Amp => "&",
+            AmpEq => "&=",
+            AmpAmp => "&&",
+            AmpAmpEq => "&&=",
+            Pipe => "|",
+            PipeEq => "|=",
+            PipePipe => "||",
+            PipePipeEq => "||=",
+            Caret => "^",
+            CaretEq => "^=",
             Lt => "<",
             Le => "<=",
+            Shl => "<<",
+            ShlEq => "<<=",
             Gt => ">",
             Ge => ">=",
+            Shr => ">>",
+            ShrEq => ">>=",
             Arrow => "->",
             Newline => "newline",
             Eof => "eof",
@@ -104,8 +127,8 @@ impl Parser {
             TokenKind::Continue => { let pos = self.cur().pos; self.bump(); Ok(Stmt::Continue(pos)) }
             TokenKind::Return => self.parse_return_stmt(),
             TokenKind::Ident(_) => {
-                // try let/assign: ident [: type]? = expr
-                if self.peek_is_colon_or_eq() { self.parse_let_like() } else {
+                // try compound-assign or let-like decl: ident (op= | [: type]? = ) expr
+                if self.peek_is_compound_assign() { self.parse_assign_stmt() } else if self.peek_is_colon_or_eq() { self.parse_let_like() } else {
                     let e = self.parse_expr()?; let pos = Self::expr_pos(&e); Ok(Stmt::ExprStmt(e, pos))
                 }
             }
@@ -148,19 +171,21 @@ impl Parser {
                     self.bump(); // ident
                     self.expect(TokenKind::In)?;
                     let iter = self.parse_expr()?;
-                    let body = self.parse_block()?;
+                    let body = self.parse_maybe_typed_block()?;
                     Ok(Stmt::ForIn { name: name_s, iter, body, pos })
                 } else {
                     // not 'in' form, treat as expr times
-                    let expr = Expr::Ident(name_s, self.tokens[self.idx-1].pos);
+                    let pos_ident = self.cur().pos; // current token is the ident
+                    self.bump(); // consume the ident before parsing the times expression/postfix
+                    let expr = Expr::Ident(name_s, pos_ident);
                     let times = self.parse_postfix_after_ident(expr)?;
-                    let body = self.parse_block()?;
+                    let body = self.parse_maybe_typed_block()?;
                     Ok(Stmt::ForTimes { times, body, pos })
                 }
             }
             _ => {
                 let times = self.parse_expr()?;
-                let body = self.parse_block()?;
+                let body = self.parse_maybe_typed_block()?;
                 Ok(Stmt::ForTimes { times, body, pos })
             }
         }
@@ -169,17 +194,18 @@ impl Parser {
     fn parse_while_stmt(&mut self) -> ParseResult<Stmt> {
         let pos = self.cur().pos; self.bump();
         let cond = self.parse_expr()?;
-        let body = self.parse_block()?;
+        let body = self.parse_maybe_typed_block()?;
         Ok(Stmt::While { cond, body, pos })
     }
 
     fn parse_loop_stmt(&mut self) -> ParseResult<Stmt> {
         let pos = self.cur().pos; self.bump();
-        let body = self.parse_block()?;
+        let body = self.parse_maybe_typed_block()?;
         Ok(Stmt::Loop { body, pos })
     }
 
     fn parse_block(&mut self) -> ParseResult<Block> {
+        self.skip_newlines();
         let pos = self.expect(TokenKind::LBrace)?.pos;
         let mut stmts = Vec::new();
         loop {
@@ -194,24 +220,143 @@ impl Parser {
     }
 
     fn parse_expr_or_block(&mut self) -> ParseResult<Expr> {
-        if matches!(self.cur().kind, TokenKind::LBrace) { Ok(Expr::Block(self.parse_block()?)) } else { self.parse_expr() }
+        self.skip_newlines();
+        if matches!(self.cur().kind, TokenKind::LBrace) {
+            return Ok(Expr::Block(self.parse_block()?));
+        }
+        // Try typed block expression: TypeName '{' ... '}'
+        if matches!(self.cur().kind, TokenKind::Ident(_)) {
+            let save = self.idx;
+            if let Ok(to) = self.parse_type() {
+                self.skip_newlines();
+                if matches!(self.cur().kind, TokenKind::LBrace) {
+                    let pos = self.cur().pos;
+                    let b = self.parse_block()?;
+                    return Ok(Expr::Cast { expr: Box::new(Expr::Block(b)), to, pos });
+                }
+            }
+            // rewind if not a typed block
+            self.idx = save;
+        }
+        self.parse_expr()
     }
 
     fn parse_expr(&mut self) -> ParseResult<Expr> { self.parse_ternary() }
 
     fn parse_ternary(&mut self) -> ParseResult<Expr> {
-        let cond = self.parse_compare()?;
+        let cond = self.parse_nullish()?
+        ;
         if matches!(self.cur().kind, TokenKind::Question) {
             let pos = if let Some(p) = Self::expr_pos_opt(&cond) { p } else { self.cur().pos };
             self.bump();
             let then_e = self.parse_expr_or_block()?;
             let else_e = if matches!(self.cur().kind, TokenKind::Colon) { self.bump(); Some(self.parse_expr_or_block()?) } else { None };
             Ok(Expr::IfElse { cond: Box::new(cond), then_e: Box::new(then_e), else_e: else_e.map(Box::new), pos })
-        } else { Ok(cond) }
+        } else {
+            // Implicit ternary: allow `cond <typed|untyped block> : <expr_or_block>`
+            let pos = if let Some(p) = Self::expr_pos_opt(&cond) { p } else { self.cur().pos };
+            let mut is_implicit_then = false;
+            if matches!(self.cur().kind, TokenKind::LBrace) {
+                is_implicit_then = true;
+            } else if matches!(self.cur().kind, TokenKind::Ident(_)) {
+                let save = self.idx;
+                if let Ok(_) = self.parse_type() {
+                    if matches!(self.cur().kind, TokenKind::LBrace) { is_implicit_then = true; }
+                }
+                self.idx = save;
+            }
+            if is_implicit_then {
+                let save_then = self.idx;
+                let then_e = self.parse_expr_or_block()?;
+                if matches!(self.cur().kind, TokenKind::Colon) {
+                    self.bump();
+                    let else_e = Some(self.parse_expr_or_block()?);
+                    Ok(Expr::IfElse { cond: Box::new(cond), then_e: Box::new(then_e), else_e: else_e.map(Box::new), pos })
+                } else {
+                    // no ':' -> rewind; then-block belongs to outer construct (e.g., for-times)
+                    self.idx = save_then;
+                    Ok(cond)
+                }
+            } else {
+                Ok(cond)
+            }
+        }
+    }
+
+    fn parse_nullish(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_logical_or()?;
+        loop {
+            let pos = Self::expr_pos(&left);
+            if !matches!(self.cur().kind, TokenKind::QuestionQuestion) { break; }
+            self.bump();
+            let right = self.parse_logical_or()?;
+            left = Expr::Binary { op: BinOp::NullishCoalesce, left: Box::new(left), right: Box::new(right), pos };
+        }
+        Ok(left)
+    }
+
+    fn parse_logical_or(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_logical_and()?;
+        loop {
+            let pos = Self::expr_pos(&left);
+            if !matches!(self.cur().kind, TokenKind::PipePipe) { break; }
+            self.bump();
+            let right = self.parse_logical_and()?;
+            left = Expr::Binary { op: BinOp::LOr, left: Box::new(left), right: Box::new(right), pos };
+        }
+        Ok(left)
+    }
+
+    fn parse_logical_and(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_bit_or()?;
+        loop {
+            let pos = Self::expr_pos(&left);
+            if !matches!(self.cur().kind, TokenKind::AmpAmp) { break; }
+            self.bump();
+            let right = self.parse_bit_or()?;
+            left = Expr::Binary { op: BinOp::LAnd, left: Box::new(left), right: Box::new(right), pos };
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_or(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_bit_xor()?;
+        loop {
+            let pos = Self::expr_pos(&left);
+            if !matches!(self.cur().kind, TokenKind::Pipe) { break; }
+            self.bump();
+            let right = self.parse_bit_xor()?;
+            left = Expr::Binary { op: BinOp::BitOr, left: Box::new(left), right: Box::new(right), pos };
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_xor(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_bit_and()?;
+        loop {
+            let pos = Self::expr_pos(&left);
+            if !matches!(self.cur().kind, TokenKind::Caret) { break; }
+            self.bump();
+            let right = self.parse_bit_and()?;
+            left = Expr::Binary { op: BinOp::BitXor, left: Box::new(left), right: Box::new(right), pos };
+        }
+        Ok(left)
+    }
+
+    fn parse_bit_and(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_compare()?;
+        loop {
+            let pos = Self::expr_pos(&left);
+            if !matches!(self.cur().kind, TokenKind::Amp) { break; }
+            self.bump();
+            let right = self.parse_compare()?;
+            left = Expr::Binary { op: BinOp::BitAnd, left: Box::new(left), right: Box::new(right), pos };
+        }
+        Ok(left)
     }
 
     fn parse_compare(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_add_sub()?;
+        let mut left = self.parse_shift()?;
         loop {
             let pos = Self::expr_pos(&left);
             let op = match self.cur().kind {
@@ -223,6 +368,18 @@ impl Parser {
                 TokenKind::Ge => BinOp::Ge,
                 _ => break,
             };
+            self.bump();
+            let right = self.parse_shift()?;
+            left = Expr::Binary { op, left: Box::new(left), right: Box::new(right), pos };
+        }
+        Ok(left)
+    }
+
+    fn parse_shift(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_add_sub()?;
+        loop {
+            let pos = Self::expr_pos(&left);
+            let op = match self.cur().kind { TokenKind::Shl => BinOp::Shl, TokenKind::Shr => BinOp::Shr, _ => break };
             self.bump();
             let right = self.parse_add_sub()?;
             left = Expr::Binary { op, left: Box::new(left), right: Box::new(right), pos };
@@ -246,7 +403,7 @@ impl Parser {
         let mut left = self.parse_unary()?;
         loop {
             let pos = Self::expr_pos(&left);
-            let op = match self.cur().kind { TokenKind::Star => BinOp::Mul, TokenKind::Slash => BinOp::Div, _ => break };
+            let op = match self.cur().kind { TokenKind::Star => BinOp::Mul, TokenKind::Slash => BinOp::Div, TokenKind::Percent => BinOp::Mod, _ => break };
             self.bump();
             let right = self.parse_unary()?;
             left = Expr::Binary { op, left: Box::new(left), right: Box::new(right), pos };
@@ -257,6 +414,7 @@ impl Parser {
     fn parse_unary(&mut self) -> ParseResult<Expr> {
         match self.cur().kind {
             TokenKind::Minus => { let pos = self.cur().pos; self.bump(); let e = self.parse_unary()?; Ok(Expr::Unary { op: UnOp::Neg, expr: Box::new(e), pos }) }
+            TokenKind::Not => { let pos = self.cur().pos; self.bump(); let e = self.parse_unary()?; Ok(Expr::Unary { op: UnOp::Not, expr: Box::new(e), pos }) }
             _ => self.parse_postfix(),
         }
     }
@@ -280,20 +438,45 @@ impl Parser {
                     expr = Expr::Call { callee: Box::new(expr), args, pos };
                 }
                 TokenKind::Dot => {
-                    // method-style conversions: .string() .i32() .u32() .f32()
+                    // method calls or built-in conversions
                     let dot_pos = self.cur().pos; self.bump();
-                    let name = match &self.cur().kind { TokenKind::Ident(s) => s.clone(), _ => return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: "conversion name", found: Self::kind_name(&self.cur().kind) }, pos: self.cur().pos }) };
+                    let name_pos = self.cur().pos;
+                    let name = match &self.cur().kind { TokenKind::Ident(s) => s.clone(), _ => return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: "method or conversion name", found: Self::kind_name(&self.cur().kind) }, pos: self.cur().pos }) };
                     self.bump();
-                    self.expect(TokenKind::LParen)?; // require empty parens
-                    self.expect(TokenKind::RParen)?;
-                    let to = match name.as_str() {
-                        "string" => TypeName { base: BaseType::String, params: vec![] },
-                        "i32" => TypeName { base: BaseType::I32, params: vec![] },
-                        "u32" => TypeName { base: BaseType::U32, params: vec![] },
-                        "f32" => TypeName { base: BaseType::F32, params: vec![] },
-                        _ => return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: "conversion name (.string/.i32/.u32/.f32)", found: "identifier" }, pos: dot_pos }),
-                    };
-                    expr = Expr::Cast { expr: Box::new(expr), to, pos: dot_pos };
+                    if matches!(self.cur().kind, TokenKind::LParen) {
+                        // parse argument list
+                        let mut args = Vec::new();
+                        self.bump();
+                        if !matches!(self.cur().kind, TokenKind::RParen) {
+                            loop {
+                                args.push(self.parse_expr()?);
+                                if matches!(self.cur().kind, TokenKind::Comma) { self.bump(); continue; }
+                                break;
+                            }
+                        }
+                        self.expect(TokenKind::RParen)?;
+                        // built-in zero-arg conversions remain as casts
+                        if args.is_empty() {
+                            let to = match name.as_str() {
+                                "string" => Some(TypeName { base: BaseType::String, params: vec![] }),
+                                "i32" => Some(TypeName { base: BaseType::I32, params: vec![] }),
+                                "u32" => Some(TypeName { base: BaseType::U32, params: vec![] }),
+                                "f32" => Some(TypeName { base: BaseType::F32, params: vec![] }),
+                                _ => None,
+                            };
+                            if let Some(to) = to { expr = Expr::Cast { expr: Box::new(expr), to, pos: dot_pos }; continue; }
+                        }
+                        // desugar obj.method(a,b) -> method(obj, a, b)
+                        let mut full_args = Vec::with_capacity(1 + args.len());
+                        full_args.push(expr);
+                        full_args.extend(args);
+                        let callee = Expr::Ident(name, name_pos);
+                        let pos_call = dot_pos;
+                        expr = Expr::Call { callee: Box::new(callee), args: full_args, pos: pos_call };
+                    } else {
+                        // property access not supported
+                        return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: "( for method call", found: Self::kind_name(&self.cur().kind) }, pos: name_pos });
+                    }
                 }
                 TokenKind::As => {
                     // explicit cast: expr as Type
@@ -307,7 +490,60 @@ impl Parser {
         Ok(expr)
     }
 
+    fn peek_is_compound_assign(&self) -> bool {
+        if !matches!(self.cur().kind, TokenKind::Ident(_)) { return false; }
+        let i = self.idx + 1; if i >= self.tokens.len() { return false; }
+        use TokenKind::*;
+        matches!(self.tokens[i].kind,
+            PlusEq | MinusEq | StarEq | SlashEq | PercentEq |
+            AmpEq | PipeEq | CaretEq | ShlEq | ShrEq |
+            AmpAmpEq | PipePipeEq | QuestionQuestionEq
+        )
+    }
+
+    fn parse_assign_stmt(&mut self) -> ParseResult<Stmt> {
+        let name = if let TokenKind::Ident(s) = &self.cur().kind { s.clone() } else { unreachable!() };
+        let pos = self.cur().pos; self.bump();
+        let op = self.parse_assign_op()?;
+        let expr = self.parse_expr()?;
+        Ok(Stmt::Assign { name, op, expr, pos })
+    }
+
+    fn parse_assign_op(&mut self) -> ParseResult<AssignOp> {
+        use TokenKind::*;
+        let op = match self.cur().kind {
+            PlusEq => AssignOp::AddAssign,
+            MinusEq => AssignOp::SubAssign,
+            StarEq => AssignOp::MulAssign,
+            SlashEq => AssignOp::DivAssign,
+            PercentEq => AssignOp::ModAssign,
+            AmpEq => AssignOp::BitAndAssign,
+            PipeEq => AssignOp::BitOrAssign,
+            CaretEq => AssignOp::BitXorAssign,
+            ShlEq => AssignOp::ShlAssign,
+            ShrEq => AssignOp::ShrAssign,
+            AmpAmpEq => AssignOp::LAndAssign,
+            PipePipeEq => AssignOp::LOrAssign,
+            QuestionQuestionEq => AssignOp::NullishAssign,
+            _ => return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: "assignment operator", found: Self::kind_name(&self.cur().kind) }, pos: self.cur().pos })
+        };
+        self.bump();
+        Ok(op)
+    }
+
     fn parse_primary(&mut self) -> ParseResult<Expr> {
+        // typed block as primary expression: TypeName '{' ... '}'
+        if matches!(self.cur().kind, TokenKind::Ident(_)) {
+            let save = self.idx;
+            if let Ok(to) = self.parse_type() {
+                if matches!(self.cur().kind, TokenKind::LBrace) {
+                    let pos = self.cur().pos;
+                    let b = self.parse_block()?;
+                    return Ok(Expr::Cast { expr: Box::new(Expr::Block(b)), to, pos });
+                }
+            }
+            self.idx = save;
+        }
         match &self.cur().kind {
             TokenKind::Int(v) => { let pos = self.cur().pos; let val = *v; self.bump();
                 // possible range: previous expression .. next expression handled in parse_range? Easier: if next is DotDot, parse start..end here
@@ -365,12 +601,74 @@ impl Parser {
         }
     }
 
+    // Parse a block, optionally preceded by a type name (e.g., `void { ... }`).
+    // The type (if any) is ignored here because statements that accept blocks
+    // do not carry type annotations. Typed blocks as expressions are handled
+    // in `parse_expr_or_block`.
+    fn parse_maybe_typed_block(&mut self) -> ParseResult<Block> {
+        self.skip_newlines();
+        if matches!(self.cur().kind, TokenKind::Ident(_)) {
+            let save = self.idx;
+            if let Ok(_to) = self.parse_type() {
+                self.skip_newlines();
+                if matches!(self.cur().kind, TokenKind::LBrace) {
+                    return self.parse_block();
+                }
+            }
+            // rewind if not actually a typed block prefix
+            self.idx = save;
+        }
+        self.parse_block()
+    }
+
     fn parse_type(&mut self) -> ParseResult<TypeName> {
-        // simple identifiers as types + Option<T> / Range<T> with single parameter using angle brackets is not in syntax; using names like Option<u32> would require '<' '>' which we don't have. For now parse builtins by identifier.
+        // Parse base identifier
         let ident = match &self.cur().kind { TokenKind::Ident(s) => s.clone(), _ => return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: "type name", found: Self::kind_name(&self.cur().kind) }, pos: self.cur().pos }) };
         self.bump();
-        let base = match ident.as_str() { "u32" => BaseType::U32, "i32" => BaseType::I32, "f32" => BaseType::F32, "bool" => BaseType::Bool, "string" => BaseType::String, _ => BaseType::Unit };
-        Ok(TypeName { base, params: vec![] })
+        let base = match ident.as_str() {
+            "u32" => BaseType::U32,
+            "i32" => BaseType::I32,
+            "f32" => BaseType::F32,
+            "bool" => BaseType::Bool,
+            "string" => BaseType::String,
+            "unit" => BaseType::Unit,
+            "void" => BaseType::Unit,
+            "Option" => BaseType::Option,
+            "Range" => BaseType::Range,
+            "Vec" => BaseType::Vec,
+            "Set" => BaseType::Set,
+            "Map" => BaseType::Map,
+            _ => BaseType::Unit,
+        };
+        let mut params: Vec<TypeName> = Vec::new();
+        if matches!(self.cur().kind, TokenKind::Lt) {
+            // Parse generic params: <T, U>
+            self.bump(); // consume '<'
+            if matches!(self.cur().kind, TokenKind::Gt) {
+                return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: "type parameter", found: Self::kind_name(&self.cur().kind) }, pos: self.cur().pos });
+            }
+            loop {
+                params.push(self.parse_type()?);
+                if matches!(self.cur().kind, TokenKind::Comma) { self.bump(); continue; }
+                break;
+            }
+            // expect '>'
+            if !matches!(self.cur().kind, TokenKind::Gt) {
+                return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: ">", found: Self::kind_name(&self.cur().kind) }, pos: self.cur().pos });
+            }
+            self.bump();
+        }
+        // Optional arity validation (soft check; parser returns and typechecker can enforce more)
+        match base {
+            BaseType::Option | BaseType::Range | BaseType::Vec | BaseType::Set => {
+                if params.len() != 1 { return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: "one type parameter", found: "different arity" }, pos: self.cur().pos }); }
+            }
+            BaseType::Map => {
+                if params.len() != 2 { return Err(ParseError { kind: ParseErrorKind::UnexpectedToken { expected: "two type parameters", found: "different arity" }, pos: self.cur().pos }); }
+            }
+            _ => {}
+        }
+        Ok(TypeName { base, params })
     }
 
     fn parse_postfix_after_ident(&mut self, ident_expr: Expr) -> ParseResult<Expr> {

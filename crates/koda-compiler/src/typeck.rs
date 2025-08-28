@@ -25,6 +25,9 @@ impl Subst {
             }
             Type::Option(inner) => Type::Option(Box::new(self.apply(inner))),
             Type::Range(inner) => Type::Range(Box::new(self.apply(inner))),
+            Type::Vec(inner) => Type::Vec(Box::new(self.apply(inner))),
+            Type::Set(inner) => Type::Set(Box::new(self.apply(inner))),
+            Type::Map(k, v) => Type::Map(Box::new(self.apply(k)), Box::new(self.apply(v))),
             Type::Func(ps, r) => Type::Func(ps.iter().map(|p| self.apply(p)).collect(), Box::new(self.apply(r))),
             _ => t.clone(),
         }
@@ -108,6 +111,19 @@ impl Tc {
                 let inner = tn.params.get(0).map(Self::from_typename).unwrap_or(Type::U32);
                 Type::Range(Box::new(inner))
             }
+            BaseType::Vec => {
+                let inner = tn.params.get(0).map(Self::from_typename).unwrap_or(Type::Unit);
+                Type::Vec(Box::new(inner))
+            }
+            BaseType::Set => {
+                let inner = tn.params.get(0).map(Self::from_typename).unwrap_or(Type::Unit);
+                Type::Set(Box::new(inner))
+            }
+            BaseType::Map => {
+                let k = tn.params.get(0).map(Self::from_typename).unwrap_or(Type::Unit);
+                let v = tn.params.get(1).map(Self::from_typename).unwrap_or(Type::Unit);
+                Type::Map(Box::new(k), Box::new(v))
+            }
         }
     }
 
@@ -127,6 +143,57 @@ impl Tc {
         }
     }
 
+    fn unify_integer(&mut self, a: &Type, b: &Type) -> TypeResult<Type> {
+        use Type::*;
+        let aa = self.subst.apply(a);
+        let bb = self.subst.apply(b);
+        match (aa, bb) {
+            (U32, U32) => Ok(Type::U32),
+            (I32, I32) => Ok(Type::I32),
+            (IntLit, U32) | (U32, IntLit) => Ok(Type::U32),
+            (IntLit, I32) | (I32, IntLit) => Ok(Type::I32),
+            // For generic unification use-case we default IntLit+IntLit to U32,
+            // but binary operator result types need to sometimes preserve IntLit.
+            // Callers that need preservation should use `integer_op_result`.
+            (IntLit, IntLit) => Ok(Type::U32),
+            (Var(id), t @ U32) | (t @ U32, Var(id)) => { self.subst.bind(id, t.clone()); Ok(t) }
+            (Var(id), t @ I32) | (t @ I32, Var(id)) => { self.subst.bind(id, t.clone()); Ok(t) }
+            (l, r) => Err(TypeError { message: format!("integer type mismatch: {:?} vs {:?}", l, r), pos: Position { index: 0, line: 0, column: 0 } })
+        }
+    }
+
+    // Ensure a type is an integer (u32/i32/int literal or a type var), preserving IntLit/Var if present.
+    fn ensure_integer(&mut self, t: &Type) -> TypeResult<Type> {
+        use Type::*;
+        let tt = self.subst.apply(t);
+        match tt {
+            U32 | I32 | IntLit | Var(_) => Ok(tt),
+            other => Err(TypeError { message: format!("expected integer type, got {:?}", other), pos: Position { index: 0, line: 0, column: 0 } })
+        }
+    }
+
+    // Integer binary operator result unification that preserves IntLit when both operands are IntLit
+    // and does not prematurely default to U32.
+    fn integer_op_result(&mut self, a: &Type, b: &Type) -> TypeResult<Type> {
+        use Type::*;
+        let aa = self.subst.apply(a);
+        let bb = self.subst.apply(b);
+        match (aa, bb) {
+            (U32, U32) => Ok(U32),
+            (I32, I32) => Ok(I32),
+            (IntLit, U32) | (U32, IntLit) => Ok(U32),
+            (IntLit, I32) | (I32, IntLit) => Ok(I32),
+            (IntLit, IntLit) => Ok(IntLit),
+            (Var(id), t @ U32) | (t @ U32, Var(id)) => { self.subst.bind(id, t.clone()); Ok(U32) }
+            (Var(id), t @ I32) | (t @ I32, Var(id)) => { self.subst.bind(id, t.clone()); Ok(I32) }
+            // If one side is a var and the other is IntLit, keep it flexible
+            (v @ Var(_), IntLit) | (IntLit, v @ Var(_)) => Ok(v),
+            // Var vs Var: keep as the first var
+            (v @ Var(_), Var(_)) => Ok(v),
+            (l, r) => Err(TypeError { message: format!("integer op type mismatch: {:?} vs {:?}", l, r), pos: Position { index: 0, line: 0, column: 0 } })
+        }
+    }
+
     fn unify(&mut self, a: &Type, b: &Type) -> TypeResult<Type> {
         use Type::*;
         let aa = self.subst.apply(a);
@@ -136,9 +203,12 @@ impl Tc {
             (Var(id), t) | (t, Var(id)) => { self.subst.bind(id, t.clone()); Ok(t) }
             (Option(a), Option(b)) => { let u = self.unify(&a, &b)?; Ok(Option(Box::new(u))) }
             (Range(a), Range(b)) => { let u = self.unify_numeric(&a, &b)?; Ok(Range(Box::new(u))) }
+            (Vec(a), Vec(b)) => { let u = self.unify(&a, &b)?; Ok(Vec(Box::new(u))) }
+            (Set(a), Set(b)) => { let u = self.unify(&a, &b)?; Ok(Set(Box::new(u))) }
+            (Map(ka, va), Map(kb, vb)) => { let ku = self.unify(&ka, &kb)?; let vu = self.unify(&va, &vb)?; Ok(Map(Box::new(ku), Box::new(vu))) }
             (Func(a_ps, a_r), Func(b_ps, b_r)) => {
                 if a_ps.len() != b_ps.len() { return Err(TypeError { message: "function arity mismatch".into(), pos: Position { index: 0, line: 0, column: 0 } }); }
-                let mut ps: Vec<Type> = Vec::with_capacity(a_ps.len());
+                let mut ps: std::vec::Vec<Type> = std::vec::Vec::with_capacity(a_ps.len());
                 for (ap, bp) in a_ps.iter().zip(b_ps.iter()) { ps.push(self.unify(ap, bp)?); }
                 let r = self.unify(&a_r, &b_r)?;
                 Ok(Func(ps, Box::new(r)))
@@ -219,6 +289,34 @@ impl Tc {
                 self.insert(name.clone(), final_ty);
                 Ok(())
             }
+            Stmt::Assign { name, op, expr, pos } => {
+                let vty = self.lookup(name).ok_or(TypeError { message: format!("unbound identifier: {}", name), pos: *pos })?;
+                let ety = self.check_expr(expr, None)?;
+                use AssignOp::*;
+                let _ = match op {
+                    AddAssign | SubAssign | MulAssign | DivAssign => self.unify_numeric_at(&vty, &ety, *pos)?,
+                    ModAssign | BitAndAssign | BitOrAssign | BitXorAssign => self.unify_integer(&vty, &ety)?,
+                    ShlAssign | ShrAssign => {
+                        // lhs integer, rhs integer; result lhs type
+                        let _lhs = self.unify_integer(&vty, &vty)?;
+                        let _rhs = self.unify_integer(&ety, &ety)?;
+                        self.subst.apply(&vty)
+                    }
+                    LAndAssign | LOrAssign => { self.unify_at(&vty, &Type::Bool, *pos)?; self.unify_at(&ety, &Type::Bool, *pos)?; Type::Bool }
+                    NullishAssign => {
+                        match self.subst.apply(&vty) {
+                            Type::Option(inner) => {
+                                let target = match self.subst.apply(&ety) { Type::Option(r) => *r, other => other };
+                                let _ = self.unify_at(&inner, &target, *pos)?;
+                                Type::Option(inner)
+                            }
+                            other => return Err(TypeError { message: format!("??= requires Option<T> on LHS, got {:?}", other), pos: *pos }),
+                        }
+                    }
+                    Assign => { self.unify_at(&vty, &ety, *pos)? }
+                };
+                Ok(())
+            }
             Stmt::ExprStmt(e, _) => { let _ = self.check_expr(e, None)?; Ok(()) }
             Stmt::ForIn { name, iter, body, .. } => {
                 let ity = self.check_expr(iter, None)?;
@@ -280,9 +378,29 @@ impl Tc {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                         let t = self.unify_numeric_at(&lt, &rt, Self::expr_pos(left))?; Ok(t)
                     }
+                    BinOp::Mod => {
+                        let t = self.integer_op_result(&lt, &rt)?; Ok(t)
+                    }
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                        let t = self.integer_op_result(&lt, &rt)?; Ok(t)
+                    }
+                    BinOp::Shl | BinOp::Shr => {
+                        // left integer type preserved; right must be integer
+                        let lti = self.ensure_integer(&lt)?; let _rti = self.ensure_integer(&rt)?; Ok(lti)
+                    }
+                    BinOp::LAnd | BinOp::LOr => { self.unify_at(&lt, &Type::Bool, Self::expr_pos(left))?; self.unify_at(&rt, &Type::Bool, Self::expr_pos(right))?; Ok(Type::Bool) }
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                         // comparisons on numeric for now
                         let _ = self.unify_numeric_at(&lt, &rt, Self::expr_pos(left))?; Ok(Type::Bool)
+                    }
+                    BinOp::NullishCoalesce => {
+                        match self.subst.apply(&lt) {
+                            Type::Option(inner) => {
+                                let rhs_inner = match self.subst.apply(&rt) { Type::Option(r) => *r, other => other };
+                                let t = self.unify_at(&inner, &rhs_inner, Self::expr_pos(left))?; Ok(t)
+                            }
+                            other => Err(TypeError { message: format!("?? expects Option<T> on left, got {:?}", other), pos: Self::expr_pos(left) })
+                        }
                     }
                 }
             }

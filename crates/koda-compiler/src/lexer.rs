@@ -135,33 +135,62 @@ impl Lexer {
             '}' => { self.bump(); Ok(Token { kind: TokenKind::RBrace, pos }) }
             ',' => { self.bump(); Ok(Token { kind: TokenKind::Comma, pos }) }
             ':' => { self.bump(); Ok(Token { kind: TokenKind::Colon, pos }) }
-            '?' => { self.bump(); Ok(Token { kind: TokenKind::Question, pos }) }
+            // '?' handled below together with '??' and '??=' to avoid duplication
             '.' => { 
                 self.bump();
                 if self.match_next('.') { Ok(Token { kind: TokenKind::DotDot, pos }) } else { Ok(Token { kind: TokenKind::Dot, pos }) }
             }
-            '+' => { self.bump(); Ok(Token { kind: TokenKind::Plus, pos }) }
+            '+' => {
+                self.bump();
+                if self.match_next('=') { Ok(Token { kind: TokenKind::PlusEq, pos }) } else { Ok(Token { kind: TokenKind::Plus, pos }) }
+            }
             '-' => { 
                 self.bump();
-                if self.match_next('>') { Ok(Token { kind: TokenKind::Arrow, pos }) } else { Ok(Token { kind: TokenKind::Minus, pos }) }
+                if self.match_next('=') { Ok(Token { kind: TokenKind::MinusEq, pos }) }
+                else if self.match_next('>') { Ok(Token { kind: TokenKind::Arrow, pos }) }
+                else { Ok(Token { kind: TokenKind::Minus, pos }) }
             }
-            '*' => { self.bump(); Ok(Token { kind: TokenKind::Star, pos }) }
-            '/' => { self.bump(); Ok(Token { kind: TokenKind::Slash, pos }) }
+            '*' => { self.bump(); if self.match_next('=') { Ok(Token { kind: TokenKind::StarEq, pos }) } else { Ok(Token { kind: TokenKind::Star, pos }) } }
+            '/' => { self.bump(); if self.match_next('=') { Ok(Token { kind: TokenKind::SlashEq, pos }) } else { Ok(Token { kind: TokenKind::Slash, pos }) } }
+            '%' => { self.bump(); if self.match_next('=') { Ok(Token { kind: TokenKind::PercentEq, pos }) } else { Ok(Token { kind: TokenKind::Percent, pos }) } }
             '=' => { 
                 self.bump();
                 if self.match_next('=') { Ok(Token { kind: TokenKind::EqEq, pos }) } else { Ok(Token { kind: TokenKind::Eq, pos }) }
             }
             '!' => {
                 self.bump();
-                if self.match_next('=') { Ok(Token { kind: TokenKind::NotEq, pos }) } else { Err(LexError { kind: LexErrorKind::InvalidChar { ch: '!' }, pos }) }
+                if self.match_next('=') { Ok(Token { kind: TokenKind::NotEq, pos }) } else { Ok(Token { kind: TokenKind::Not, pos }) }
             }
             '<' => {
                 self.bump();
-                if self.match_next('=') { Ok(Token { kind: TokenKind::Le, pos }) } else { Ok(Token { kind: TokenKind::Lt, pos }) }
+                if self.match_next('<') {
+                    if self.match_next('=') { Ok(Token { kind: TokenKind::ShlEq, pos }) } else { Ok(Token { kind: TokenKind::Shl, pos }) }
+                } else if self.match_next('=') { Ok(Token { kind: TokenKind::Le, pos }) } else { Ok(Token { kind: TokenKind::Lt, pos }) }
             }
             '>' => {
                 self.bump();
-                if self.match_next('=') { Ok(Token { kind: TokenKind::Ge, pos }) } else { Ok(Token { kind: TokenKind::Gt, pos }) }
+                if self.match_next('>') {
+                    if self.match_next('=') { Ok(Token { kind: TokenKind::ShrEq, pos }) } else { Ok(Token { kind: TokenKind::Shr, pos }) }
+                } else if self.match_next('=') { Ok(Token { kind: TokenKind::Ge, pos }) } else { Ok(Token { kind: TokenKind::Gt, pos }) }
+            }
+            '&' => {
+                self.bump();
+                if self.match_next('&') {
+                    if self.match_next('=') { Ok(Token { kind: TokenKind::AmpAmpEq, pos }) } else { Ok(Token { kind: TokenKind::AmpAmp, pos }) }
+                } else if self.match_next('=') { Ok(Token { kind: TokenKind::AmpEq, pos }) } else { Ok(Token { kind: TokenKind::Amp, pos }) }
+            }
+            '|' => {
+                self.bump();
+                if self.match_next('|') {
+                    if self.match_next('=') { Ok(Token { kind: TokenKind::PipePipeEq, pos }) } else { Ok(Token { kind: TokenKind::PipePipe, pos }) }
+                } else if self.match_next('=') { Ok(Token { kind: TokenKind::PipeEq, pos }) } else { Ok(Token { kind: TokenKind::Pipe, pos }) }
+            }
+            '^' => { self.bump(); if self.match_next('=') { Ok(Token { kind: TokenKind::CaretEq, pos }) } else { Ok(Token { kind: TokenKind::Caret, pos }) } }
+            '?' => {
+                self.bump();
+                if self.match_next('?') {
+                    if self.match_next('=') { Ok(Token { kind: TokenKind::QuestionQuestionEq, pos }) } else { Ok(Token { kind: TokenKind::QuestionQuestion, pos }) }
+                } else { Ok(Token { kind: TokenKind::Question, pos }) }
             }
             '\n' => { self.bump(); Ok(Token { kind: TokenKind::Newline, pos }) }
             _ => Err(LexError { kind: LexErrorKind::InvalidChar { ch }, pos }),

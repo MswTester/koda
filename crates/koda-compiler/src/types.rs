@@ -8,6 +8,9 @@ pub enum BaseType {
     Unit,
     Option,
     Range,
+    Vec,
+    Set,
+    Map,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +34,10 @@ pub enum Type {
     // Option and Range wrappers
     Option(Box<Type>),
     Range(Box<Type>),
+    // Collections
+    Vec(Box<Type>),
+    Set(Box<Type>),
+    Map(Box<Type>, Box<Type>),
     // Function type: (params...) -> ret
     Func(Vec<Type>, Box<Type>),
     // Type variable for inference/unification

@@ -9,6 +9,7 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Let { name: String, ty: Option<TypeName>, value: Expr, pos: Position },
+    Assign { name: String, op: AssignOp, expr: Expr, pos: Position },
     ExprStmt(Expr, Position),
     ForIn { name: String, iter: Expr, body: Block, pos: Position },
     ForTimes { times: Expr, body: Block, pos: Position },
@@ -49,7 +50,36 @@ pub struct Param {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinOp { Add, Sub, Mul, Div, Eq, Ne, Lt, Le, Gt, Ge }
+pub enum AssignOp {
+    Assign,
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+    ModAssign,
+    BitAndAssign,
+    BitOrAssign,
+    BitXorAssign,
+    ShlAssign,
+    ShrAssign,
+    LAndAssign,
+    LOrAssign,
+    NullishAssign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    // arithmetic
+    Add, Sub, Mul, Div, Mod,
+    // bitwise
+    BitAnd, BitOr, BitXor, Shl, Shr,
+    // logical
+    LAnd, LOr,
+    // comparison
+    Eq, Ne, Lt, Le, Gt, Ge,
+    // nullish coalescing
+    NullishCoalesce,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp { Neg, Not }
