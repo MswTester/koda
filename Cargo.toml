@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "crates/koda-compiler",
+  "crates/kodac",
+]
+

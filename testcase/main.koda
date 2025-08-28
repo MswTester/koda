@@ -1,0 +1,49 @@
+# {} block앞에 type이 오면 해당 block의 반환값은 type이어야함.
+a = 10
+b: u32 = 20
+sum = (_a: u32, _b: u32) -> u32 { _a + _b }
+print(sum(a, b))
+
+for i in 0..10 {
+  print(i)
+}
+
+for 20 {
+  print("20번 출력됨")
+}
+
+k = 10
+
+k >= 10 ? {
+  print("k is over 10")
+} : {
+  print(false)
+}
+
+k >= 20 ? print(true) : print(false)
+
+dynamicVar = u32 {
+  a + b
+  a / b
+  a - b # 무조건 블럭 마지막값을 반환
+}
+print(dynamicVar)
+
+n = 5
+iter = 0..n
+for n void {
+  nxt = iter.next()
+  print(nxt)
+  nxt > 2 break
+}
+
+# print(nxt) # cannot get nxt in out of scope
+
+n = 10
+n > 5 void {
+  print("gtr 5")
+} : n > 10 ? void {
+  print("gtr 10")
+} : {
+  print("too small")
+}

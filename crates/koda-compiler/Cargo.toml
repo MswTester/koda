@@ -1,0 +1,18 @@
+[package]
+name = "koda-compiler"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "koda_compiler"
+path = "src/lib.rs"
+
+authors = ["koda-lang"]
+
+[dependencies]
+thiserror = "2.0.16"
+inkwell = { version = "0.2", optional = true }
+
+[features]
+default = []
+llvm = ["inkwell"]
